@@ -1,14 +1,19 @@
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.File;
 import java.io.FileNotFoundException;
+import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
+import java.util.TreeMap;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
@@ -17,16 +22,18 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-//import org.apache.hadoop.io.IntWritable;
+import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
-//import org.apache.hadoop.mapreduce.lib.output.SequenceFileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.SequenceFileOutputFormat;
 import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
+
+import com.nimbusds.jose.util.IOUtils;
 
 public class Main extends Configured implements Tool {
 
@@ -75,8 +82,7 @@ public class Main extends Configured implements Tool {
 		}
 	}
 
-	public static PointWritable[] readCentroidsFromReducerOutput(Configuration conf, int kClusters,
-			String folderOutputPath) throws IOException, FileNotFoundException {
+	public static PointWritable[] readCentroidsFromReducerOutput(Configuration conf, int kClusters, String folderOutputPath) throws IOException, FileNotFoundException {
 		PointWritable[] points = new PointWritable[kClusters];
 		FileSystem hdfs = FileSystem.get(conf);
 		FileStatus[] status = hdfs.listStatus(new Path(folderOutputPath));
@@ -154,7 +160,137 @@ public class Main extends Configured implements Tool {
 			System.out.println("centroids(" + name + ")[" + i + "]=> :" + points[i]);
 		System.out.println("----------------------------------");
 	}
+	
+	private static void addValue(Map<String, List<String>> map, String key, String value) {
+        if (!map.containsKey(key)) {
+            map.put(key, new ArrayList<>());
+        }
+        map.get(key).add(value);
+    }
+	
+	//in ket qua dau ra
+	public void KetQua(Configuration conf, PointWritable[] centroidsFound, String outputFilePath) throws IOException {
 
+		Map<String, List<String>> dataMap = new HashMap<>();
+		
+
+		// Đọc dữ liệu từ HDFS
+		FileSystem hdfs = FileSystem.get(conf);
+		Path hdfsPath = new Path("/kmeans-input/test.csv");
+		try (FSDataInputStream inputStream = hdfs.open(hdfsPath);
+		BufferedReader br_reader = new BufferedReader(new InputStreamReader(inputStream))) {
+			  
+			String line;
+			while ((line = br_reader.readLine()) != null) {
+				String[] A = line.split(",");
+				PointWritable P = new PointWritable(A);
+				PointWritable C = new PointWritable();
+				double minDistance = Double.MAX_VALUE;
+				for (int i = 0; i < centroidsFound.length; i++) {
+					double distance = P.calcDistance(centroidsFound[i]);
+					if (distance < minDistance) {
+						minDistance = distance;
+						C = centroidsFound[i];
+					}
+				}
+				addValue(dataMap, C.toString(), P.toString());
+			}
+		 }
+
+		  // Ghi dữ liệu vào HDFS
+		  try (FSDataOutputStream dos = hdfs.create(new Path(outputFilePath), true);
+		       BufferedWriter br_writer = new BufferedWriter(new OutputStreamWriter(dos))) {
+		    int i = 0;
+		    for (Map.Entry<String, List<String>> entry : dataMap.entrySet()) {
+		    	i++;
+		        br_writer.write("Center " + i + ": ("+entry.getKey() + ")\nPoints: " + entry.getValue().toString().replace(", ", ");  (").replace("[", "(").replace("]", ")") + "\n");
+			    br_writer.newLine();
+		    }
+		  }
+
+		  hdfs.close();
+		}
+	
+	private double calculateDaviesBouldin(List<PointWritable> dataPoints, PointWritable[] centroidsFound) {
+	    int numClusters = centroidsFound.length;
+	    double daviesBouldinIndex = 0.0;
+	    
+	    for (int i = 0; i < numClusters; i++) {
+	        double maxR = 0.0;
+	        PointWritable clusterCenterI = centroidsFound[i];
+
+	        // Calculate the average distance within cluster i
+	        double s_i = 0.0;
+	        int numPointsInClusterI = 0;
+	        for (PointWritable point : dataPoints) {
+	            double distanceToCenterI = clusterCenterI.calcDistance(point);
+	            s_i += distanceToCenterI;
+	            numPointsInClusterI++;
+	        }
+	        if (numPointsInClusterI > 0) {
+	            s_i /= numPointsInClusterI;
+
+	            // Calculate R_i for cluster i
+	            for (int j = 0; j < numClusters; j++) {
+	                if (i != j) {
+	                    PointWritable clusterCenterJ = centroidsFound[j];
+
+	                    // Calculate the average distance within cluster j
+	                    double s_j = 0.0;
+	                    int numPointsInClusterJ = 0;
+	                    for (PointWritable point : dataPoints) {
+	                        double distanceToCenterJ = clusterCenterJ.calcDistance(point);
+	                        s_j += distanceToCenterJ;
+	                        numPointsInClusterJ++;
+	                    }
+	                    if (numPointsInClusterJ > 0) {
+	                        s_j /= numPointsInClusterJ;
+
+	                        // Calculate the distance between cluster centers i and j
+	                        double distanceBetweenCenters = clusterCenterI.calcDistance(clusterCenterJ);
+
+	                        // Calculate R_i for cluster j
+	                        double R_i = (s_i + s_j) / distanceBetweenCenters;
+	                        if (R_i > maxR) {
+	                            maxR = R_i;
+	                        }
+	                    }
+	                }
+	            }
+	            daviesBouldinIndex += maxR;
+	        }
+	    }
+
+	    daviesBouldinIndex /= numClusters;
+	    return daviesBouldinIndex;
+	}
+	
+	public static List<PointWritable> readDataPointsFromHDFS(Configuration conf, String filePath) {
+        List<PointWritable> dataPoints = new ArrayList<>();
+
+        try {
+            FileSystem hdfs = FileSystem.get(conf);
+            Path hdfsPath = new Path(filePath);
+
+            if (hdfs.exists(hdfsPath)) {
+                try (BufferedReader br = new BufferedReader(new InputStreamReader(hdfs.open(hdfsPath)))) {
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        String[] values = line.split(",");
+                        PointWritable point = new PointWritable(values);
+                        dataPoints.add(point);
+                    }
+                }
+            } else {
+                System.out.println("File not found: " + filePath);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        return dataPoints;
+    }
+		
 	public int run(String[] args) throws Exception {
 
 		Configuration conf = getConf();
@@ -237,12 +373,14 @@ public class Main extends Configured implements Tool {
 		if (newCentroidPoints != null) {
 			System.out.println("------------------- FINAL RESULT -------------------");
 			writeFinalResult(conf, newCentroidPoints, outputFolderPath + "/" + outputFileName, centroidsInit);
+			KetQua(conf, newCentroidPoints, outputFolderPath+"/result2.txt");
+			
 		}
 		System.out.println("----------------------------------------------");
 		System.out.println("K-MEANS CLUSTERING FINISHED!");
 		System.out.println("Loop:" + nLoop);
-		System.out.println("Time:" + ((new Date()).getTime() - t1) + "ms");
-
+		System.out.println("Time:" + ((new Date()).getTime() - t1) + "ms");		
+		System.out.println("Davies-Bouldin: " + calculateDaviesBouldin(readDataPointsFromHDFS(conf,inputFilePath), newCentroidPoints));
 		return 1;
 	}
 
